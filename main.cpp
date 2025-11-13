@@ -133,7 +133,7 @@ int main()
   for (int tid = 0; tid < core_quan; tid++)
   {
     thread_pool[tid] = std::thread(
-        [&io_mutex, &cpu_id, tid]
+        [&msg_id, &cpu_id, &io_mutex, tid]
         {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
@@ -163,6 +163,7 @@ int main()
               break;
           }
 
+          msgsnd(msg_id, &rcv_msg, sizeof(rcv_msg.content), 0);
           msgctl(rcv_msg_id, IPC_RMID, nullptr);
 
           std::this_thread::sleep_for(std::chrono::milliseconds(900));
