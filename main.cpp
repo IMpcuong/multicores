@@ -2,10 +2,13 @@
 #include <mach/mach.h>
 #include <mach/thread_policy.h> // thread_port_t, thread_policy_set()
 #include <pthread.h> // pthread_mach_thread_np()
+#include <sys/ipc.h>
+#include <sys/msg.h>
 #include <sys/sysctl.h>
 
 #include <cassert>
 #include <chrono>
+#include <format>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -15,6 +18,11 @@
 // @Note(impcuong): Abbrev-list
 //  + np  := Non-portable (https://github.com/apple/darwin-libpthread/blob/main/src/pthread.c#L920)
 //  + cnt := count
+//  + snd := send
+//  + rcv := receive
+//  + ctl := control
+//  + rm  := remove
+//  + rc  := return-code
 //
 
 //
@@ -45,10 +53,21 @@ static inline int CPU_ISSET(int id, cpu_set_t *cpu)
   return cpu->cnt & (1 << id);
 }
 
-int pthread_setaffinity_np(pthread_t thread, size_t cpu_sz, cpu_set_t *cpu)
+#define SYSCTL_CORE_COUNT "machdep.cpu.core_count"
+
+int32_t estimate_core_quan()
 {
+  int32_t core_quan = 0;
+  size_t sz = sizeof(core_quan);
+  sysctlbyname(SYSCTL_CORE_COUNT, &core_quan, &sz, NULL, 0);
+  return core_quan;
+}
+
+int pthread_setaffinity_np(pthread_t thread, size_t each_cpu_sz, cpu_set_t *cpu)
+{
+  int32_t core_quan = estimate_core_quan();
   int core_id = 0;
-  for (; core_id < 8 * cpu_sz; core_id++)
+  for (; core_id < core_quan * each_cpu_sz; core_id++)
     if (CPU_ISSET(core_id, cpu))
       break;
 
@@ -76,30 +95,75 @@ void sched_getcpu(int &cpu_id)
 }
 // End @From
 
-#define SYSCTL_CORE_COUNT "machdep.cpu.core_count"
+#define MSG_ALLOWED_TYPE 1
+#define MSG_BUF_LEN 1024
+
+// @Docs: https://www.man7.org/linux/man-pages/man3/msgsnd.3p.html
+struct thread_shared_msg
+{
+  long type;
+  char content[MSG_BUF_LEN];
+};
 
 int main()
 {
-  int32_t core_quan = 0;
-  size_t mem = sizeof(core_quan);
-  sysctlbyname(SYSCTL_CORE_COUNT, &core_quan, &mem, NULL, 0);
+  int32_t core_quan = estimate_core_quan();
   assert(core_quan > 0);
+
+  // -----
+
+  int cpu_id = -1;
+  struct thread_shared_msg msg = {0};
+  msg.type = MSG_ALLOWED_TYPE;
+  std::string tmp_content = std::format("INFO: Daddy's dsize {}", cpu_id);
+  std::strncpy(msg.content, tmp_content.c_str(), sizeof(msg.content) - 1);
+  msg.content[MSG_BUF_LEN - 1] = '\0';
+
+  key_t send_key = ftok("." /*path=*/, 'a' /*proj_id=*/); // System V IPC key.
+  int msg_id = msgget(send_key, IPC_CREAT | 0666);
+  assert(msg_id != -1);
+
+  int msg_send_rc = msgsnd(msg_id, &msg, sizeof(msg.content), 0);
+  assert(msg_send_rc != -1);
+
+  // -----
 
   std::mutex io_mutex; // A mutex ensures orderly access to std::cout from multiple threads.
   std::vector<std::thread> thread_pool(core_quan);
-  for (int idx = 0; idx < core_quan; idx++)
+  for (int tid = 0; tid < core_quan; tid++)
   {
-    int cpu_id = -1;
-    sched_getcpu(cpu_id);
-    thread_pool[idx] = std::thread(
-        [&io_mutex, &cpu_id, idx]
+    thread_pool[tid] = std::thread(
+        [&io_mutex, &cpu_id, tid]
         {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+          key_t rcv_key = ftok("." /*path=*/, 'a' /*proj_id-*/);
+          int rcv_msg_id = msgget(rcv_key, 0666);
+
+          struct thread_shared_msg rcv_msg = {0};
+          rcv_msg.type = MSG_ALLOWED_TYPE;
+          int msg_rcv_rc = msgrcv(rcv_msg_id, &rcv_msg, sizeof(rcv_msg.content), rcv_msg.type, 0 /*msgflg=*/);
+          if (msg_rcv_rc == -1)
+          {
+            std::lock_guard<std::mutex> lock(io_mutex);
+            std::cerr << "ERROR: Thread " << tid << " failed to receive: " << strerror(errno) << std::endl;
+            return;
+          }
+
+          std::atomic<int> tick = 0;
+          sched_getcpu(cpu_id);
           while (true)
           {
             std::lock_guard<std::mutex> io_lock(io_mutex);
-            std::cout << "INFO: Thread #" << idx << ": on CPU " << cpu_id << "\n";
+            std::cout << "INFO: Thread #" << tid << "\n";
+            std::cout << "  + CPU: " << cpu_id << "\n";
+            std::cout << "  + Received message: " << rcv_msg.content << "\n";
+            tick++;
+            if (tick == 15)
+              break;
           }
+
+          msgctl(rcv_msg_id, IPC_RMID, nullptr);
 
           std::this_thread::sleep_for(std::chrono::milliseconds(900));
         }
@@ -107,14 +171,19 @@ int main()
 
     cpu_set_t cpu; // Object representing a set of CPUs.
     CPU_ZERO(&cpu);
-    CPU_SET(idx /*id=*/, &cpu);
-    int can_bind_affinity_to_thread = pthread_setaffinity_np(thread_pool[idx].native_handle(), sizeof(cpu_set_t), &cpu);
-    if (can_bind_affinity_to_thread != 0)
-      std::cerr << "ERROR: Cannot bind to the thread #" << cpu_id << "\n";
+    CPU_SET(tid /*id=*/, &cpu);
+    int affinity_thread_rc = pthread_setaffinity_np(thread_pool[tid].native_handle(), sizeof(cpu_set_t), &cpu);
+    if (affinity_thread_rc != 0)
+      std::cerr << "ERROR: Affinity thread's RC = " << affinity_thread_rc << "\n";
   }
 
   for (auto &t : thread_pool)
-    t.join();
+    if (t.joinable())
+      t.join();
+
+  // -----
+
+  msgctl(msg_id, IPC_RMID, nullptr);
 
   return 0;
 }
