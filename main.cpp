@@ -163,6 +163,7 @@ int main()
               break;
           }
 
+          std::snprintf(rcv_msg.content, MSG_BUF_LEN, "%s + %d", rcv_msg.content, cpu_id);
           msgsnd(msg_id, &rcv_msg, sizeof(rcv_msg.content), 0);
 
           std::this_thread::sleep_for(std::chrono::milliseconds(900));
