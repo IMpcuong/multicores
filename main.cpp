@@ -1,10 +1,13 @@
-#include <cpuid.h>
 #include <mach/mach.h>
 #include <mach/thread_policy.h> // thread_port_t, thread_policy_set()
 #include <pthread.h> // pthread_mach_thread_np()
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/sysctl.h>
+
+#if defined(__x86_64__) || defined(__i386__)
+  #include <cpuid.h>
+#endif
 
 #include <cassert>
 #include <chrono>
@@ -84,12 +87,21 @@ int pthread_setaffinity_np(pthread_t thread, size_t each_cpu_sz, cpu_set_t *cpu)
 
 void sched_getcpu(int &cpu_id)
 {
+#if defined(__arm64__) || defined(__aarch64__)
+  uint32_t cpu;
+  size_t info_sz = sizeof(cpu);
+  if (sysctlbyname("hw.logicalcpu", &cpu, &info_sz, NULL, 0) == 0)
+    cpu_id = static_cast<int>(cpu);
+  else
+    cpu_id = 0;
+#else
   uint32_t cpu_info[4];
   CPU_ID(cpu_info, 1 /*leaf=*/, 0 /*subleaf=*/);
   if ((cpu_info[3] & (1 << 9)) == 0)
     cpu_id = -1;
   else
     cpu_id = static_cast<unsigned>(cpu_info[1] >> 24);
+#endif
 
   cpu_id = std::max(cpu_id, 0);
 }
