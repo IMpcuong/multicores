@@ -137,7 +137,7 @@ int main()
         {
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-          key_t rcv_key = ftok("." /*path=*/, 'a' /*proj_id-*/);
+          key_t rcv_key = ftok("." /*path=*/, 'a' /*proj_id=*/);
           int rcv_msg_id = msgget(rcv_key, 0666);
 
           struct thread_shared_msg rcv_msg = {0};
