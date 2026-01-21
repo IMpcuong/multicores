@@ -1,6 +1,8 @@
+#include <cstdint>
 #include <mach/mach.h>
+#include <mach/thread_info.h> // thread_identifier_info_data_t, thread_info()
 #include <mach/thread_policy.h> // thread_port_t, thread_policy_set()
-#include <pthread.h> // pthread_mach_thread_np()
+#include <pthread.h> // pthread_mach_thread_np(), pthread_threadid_np()
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/sysctl.h>
@@ -88,12 +90,20 @@ int pthread_setaffinity_np(pthread_t thread, size_t each_cpu_sz, cpu_set_t *cpu)
 void sched_getcpu(int &cpu_id)
 {
 #if defined(__arm64__) || defined(__aarch64__)
-  uint32_t cpu;
-  size_t info_sz = sizeof(cpu);
-  if (sysctlbyname("hw.logicalcpu", &cpu, &info_sz, NULL, 0) == 0)
-    cpu_id = static_cast<int>(cpu);
+  thread_identifier_info_data_t thread_id_info;
+  mach_msg_type_number_t info_sz = THREAD_IDENTIFIER_INFO_COUNT;
+  kern_return_t rc = thread_info(mach_thread_self() /*target_act=*/, THREAD_IDENTIFIER_INFO /*flavor=*/,
+      reinterpret_cast<thread_info_t>(&thread_id_info) /*thread_info_out=*/, &info_sz /*thread_info_outCnt=*/);
+
+  uint64_t tid;
+  pthread_threadid_np(NULL /*pthread_t=*/, &tid);
+
+  assert(tid == thread_id_info.thread_id);
+  if (rc != KERN_SUCCESS)
+    cpu_id = -1;
   else
-    cpu_id = 0;
+    // @Docs: https://developer.apple.com/documentation/kernel/thread_identifier_info_data_t/1579032-thread_id
+    cpu_id = static_cast<int>(thread_id_info.thread_id);
 #else
   uint32_t cpu_info[4];
   CPU_ID(cpu_info, 1 /*leaf=*/, 0 /*subleaf=*/);
